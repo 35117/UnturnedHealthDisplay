@@ -11,7 +11,7 @@
 ## 安装
 
 1. 安装 [BepInEx 5](https://docs.bepinex.dev/)（x64 版本）到游戏根目录。
-2. 从 [Release](https://github.com/35117/UnturnedHealthDisplay/releases) 下载 `HealthDisplayMod-版本号.zip`，解压后把 `BepInEx` 文件夹覆盖到游戏根目录。
+2. 将 `BepInEx/Plugins/HealthDisplayMod.dll` 放入游戏根目录的 `BepInEx/Plugins/` 文件夹。
 3. 启动游戏（单机或主机模式），配置自动生成在 `BepInEx/config/com.trae.healthdisplay.cfg`。
 
 ## 运行模式
@@ -28,7 +28,8 @@
 
 - 显示僵尸 / 动物 / 玩家血量（数字、血条、血条+数字）
 - 显示位置：生物头顶 / 准星下方（当前瞄准目标）/ 屏幕左下角（自己血量 HUD）
-- 黑白名单：按僵尸类型、动物资产、玩家 SteamID 过滤，支持类型通配
+- 显示范围：所有 / 附近所有（可配距离）/ 视野内 / 准心附近（屏幕半径）/ 命中时（打过的目标）/ 关闭
+- 黑白名单：按僵尸类型（特殊类型枚举名）、动物资产、玩家 SteamID 过滤，支持类型通配
 - 伤害数字：攻击命中时在目标上方飘出实际伤害值，爆头数字更大且为橙色
 - 自己受到伤害时，屏幕中央显示红色伤害数字
 
@@ -48,6 +49,9 @@
 | 显示设置 | DisplayMode | Both | 显示模式：Both=血条+数字，Bar=仅血条，Number=仅数字 |
 | 显示设置 | ShowPercentage | false | 数字模式下额外显示百分比 |
 | 显示设置 | DisplayPosition | Head | 显示位置：Head=头顶，Crosshair=准星下方，Corner=屏幕左下角 |
+| 显示设置 | DisplayScope | All | 显示范围：All=距离内所有，Nearby=附近所有，View=视野内，Crosshair=准心附近，Hit=命中过的目标，Off=关闭生物血量 |
+| 显示设置 | NearbyDistance | 10 | Nearby 模式的显示距离（米） |
+| 显示设置 | CrosshairRadius | 100 | Crosshair 模式屏幕半径（像素） |
 | 显示设置 | MaxDistance | 30 | 最大显示距离（米） |
 | 显示设置 | ShowNames | true | 血条上方显示名称 |
 | 伤害数字 | ShowDamageNumbers | true | 造成伤害时显示伤害数字 |
@@ -56,18 +60,20 @@
 
 ### 名单条目格式
 
-每行一个条目（支持逗号、分号、换行分隔），三种类型 + 通配：
+黑/白名单使用插件管理器的**生物选择器**（`Unturned.CreatureList` 标签），也可手动填写，每行一个条目（支持逗号、分号、换行分隔）：
 
 | 条目 | 含义 |
 |------|------|
-| `Z:0` | 僵尸类型 0（ZombieTable 索引）不显示/只显示 |
+| `Z:NORMAL` | 僵尸类型（EZombieSpeciality 枚举名：NORMAL/MEGA/SPRINTER/CRAWLER/ACID/BURNER 等） |
 | `A:12` | 动物资产 ID 12（Asset ID） |
 | `P:76561198000000000` | 玩家 SteamID |
 | `Z:*` / `A:*` / `P:*` | 对应类型的全部 |
 
-示例（黑名单：只不显示类型 0 和类型 5 的僵尸）：
+> 兼容旧版数字写法：`Z:0`（僵尸类型表索引）仍可识别。
+
+示例（黑名单：不显示普通僵尸与类型 5 的僵尸）：
 ```
-Z:0
+Z:NORMAL
 Z:5
 ```
 
@@ -80,7 +86,7 @@ Z:*
 
 环境要求：.NET Framework 4.x（`csc.exe`）、C# 5 语法。
 
-运行 `build.bat`，输出 `BepInEx/Plugins/HealthDisplayMod.dll`。
+运行 `HealthDisplay-Source/build.bat`，输出 `BepInEx/Plugins/HealthDisplayMod.dll`。
 
 ## 兼容性
 

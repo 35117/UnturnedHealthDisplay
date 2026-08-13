@@ -1,12 +1,13 @@
 // ============================================================
 //  HealthDisplay.cs  —  血量显示插件（Unturned BepInEx 5）
 //  作者：35117+Deepseek-v4-flash-0731
-//  版本：v26.8.13.1
+//  版本：v26.8.13.2
 //
 //  功能：
 //   - 显示生物血量（数字 / 血条 / 两者）
 //   - 显示位置：头顶 / 准星下方 / 屏幕角落
-//   - 黑白名单过滤（僵尸类型 Z:x、动物资产 A:x、玩家 P:SteamID，支持 * 通配）
+//   - 显示范围：所有 / 附近所有（可配距离）/ 视野内 / 准心附近 / 命中时 / 关闭
+//   - 黑白名单过滤（生物选择器标签：僵尸 Z:类型名、动物 A:资产ID，支持 * 通配与玩家 P:SteamID）
 //   - 伤害数字：造成伤害时在目标上方飘出伤害数值
 //   - 自己受到的伤害会以红色数字在屏幕中央提示
 //
@@ -25,7 +26,7 @@ using HarmonyLib;
 
 namespace HealthDisplay
 {
-	[BepInPlugin("com.trae.healthdisplay", "血量显示 HealthDisplay", "26.8.13.1")]
+	[BepInPlugin("com.trae.healthdisplay", "血量显示 HealthDisplay", "26.8.13.2")]
 	public class HealthDisplayPlugin : BaseUnityPlugin
 	{
 		// ==================== 配置分类 ====================
@@ -45,6 +46,9 @@ namespace HealthDisplay
 		public static ConfigEntry<string> cfgDisplayMode;
 		public static ConfigEntry<bool> cfgShowPercentage;
 		public static ConfigEntry<string> cfgDisplayPosition;
+		public static ConfigEntry<string> cfgDisplayScope;
+		public static ConfigEntry<float> cfgNearbyDistance;
+		public static ConfigEntry<float> cfgCrosshairRadius;
 		public static ConfigEntry<float> cfgMaxDistance;
 		public static ConfigEntry<bool> cfgShowNames;
 		public static ConfigEntry<bool> cfgShowDamageNumbers;
@@ -65,6 +69,11 @@ namespace HealthDisplay
 
 		private static List<DamageNumber> damageNumbers = new List<DamageNumber>();
 		private const int MAX_DAMAGE_NUMBERS = 60;
+
+		// "命中时"显示范围：本机玩家命中过的目标
+		private static HashSet<Zombie> hitZombies = new HashSet<Zombie>();
+		private static HashSet<Animal> hitAnimals = new HashSet<Animal>();
+		private static HashSet<Player> hitPlayers = new HashSet<Player>();
 
 		// 名单（解析后的 key 列表）
 		private static List<string> parsedWhite = new List<string>();
@@ -91,9 +100,11 @@ namespace HealthDisplay
 					Category(CatFilter, "名单模式：Black=黑名单（名单中的不显示），White=白名单（只显示名单中的）",
 						new AcceptableValueList<string>("Black", "White"), "Unturned.Cycle"));
 				cfgWhiteList = Config.Bind("Filter", "WhiteList", "",
-					Category(CatFilter, "白名单列表，每行一个，支持 Z:僵尸类型ID / A:动物资产ID / P:玩家SteamID / 类型:* 通配"));
+					Category(CatFilter, "白名单生物列表（生物选择器），僵尸 Z:类型名（NORMAL/MEGA 等），动物 A:资产ID，玩家 P:SteamID，支持 * 通配",
+						null, "Unturned.CreatureList"));
 				cfgBlackList = Config.Bind("Filter", "BlackList", "",
-					Category(CatFilter, "黑名单列表，每行一个，支持 Z:僵尸类型ID / A:动物资产ID / P:玩家SteamID / 类型:* 通配"));
+					Category(CatFilter, "黑名单生物列表（生物选择器），僵尸 Z:类型名（NORMAL/MEGA 等），动物 A:资产ID，玩家 P:SteamID，支持 * 通配",
+						null, "Unturned.CreatureList"));
 				cfgShowZombies = Config.Bind("Filter", "ShowZombies", true, Category(CatFilter, "是否显示僵尸血量"));
 				cfgShowAnimals = Config.Bind("Filter", "ShowAnimals", true, Category(CatFilter, "是否显示动物血量"));
 				cfgShowPlayers = Config.Bind("Filter", "ShowPlayers", false, Category(CatFilter, "是否显示玩家血量（仅服务器端生效）"));
@@ -106,6 +117,13 @@ namespace HealthDisplay
 				cfgDisplayPosition = Config.Bind("Display", "DisplayPosition", "Head",
 					Category(CatDisplay, "显示位置：Head=生物头顶，Crosshair=准星下方（当前瞄准目标），Corner=屏幕左下角",
 						new AcceptableValueList<string>("Head", "Crosshair", "Corner"), "Unturned.Cycle"));
+				cfgDisplayScope = Config.Bind("Display", "DisplayScope", "All",
+					Category(CatDisplay, "显示范围（哪些生物显示血量）：All=距离内所有，Nearby=附近所有（单独配置距离），View=视野内，Crosshair=准心附近（屏幕半径），Hit=命中过的目标，Off=关闭生物血量",
+						new AcceptableValueList<string>("All", "Nearby", "View", "Crosshair", "Hit", "Off"), "Unturned.Cycle"));
+				cfgNearbyDistance = Config.Bind("Display", "NearbyDistance", 10f,
+					Category(CatDisplay, "Nearby 附近所有模式的显示距离（米）", new AcceptableValueRange<float>(1f, 200f)));
+				cfgCrosshairRadius = Config.Bind("Display", "CrosshairRadius", 100f,
+					Category(CatDisplay, "Crosshair 准心附近模式的屏幕半径（像素），生物投影到屏幕后距准心小于该值则显示", new AcceptableValueRange<float>(10f, 500f)));
 				cfgMaxDistance = Config.Bind("Display", "MaxDistance", 30f,
 					Category(CatDisplay, "最大显示距离（米），超过该距离不显示", new AcceptableValueRange<float>(5f, 500f)));
 				cfgShowNames = Config.Bind("Display", "ShowNames", true,
@@ -136,7 +154,7 @@ namespace HealthDisplay
 
 				ParseLists();
 
-				Logger.LogInfo("[HealthDisplay] 插件启动完成 v26.8.13.1");
+				Logger.LogInfo("[HealthDisplay] 插件启动完成 v26.8.13.2");
 			}
 			catch (Exception e)
 			{
@@ -170,6 +188,14 @@ namespace HealthDisplay
 					{
 						damageNumbers.RemoveAt(i);
 					}
+				}
+
+				// 清理已死亡/失效的命中目标
+				if (cfgDisplayScope != null && cfgDisplayScope.Value == "Hit")
+				{
+					hitZombies.RemoveWhere(delegate(Zombie z) { return z == null || z.isDead; });
+					hitAnimals.RemoveWhere(delegate(Animal a) { return a == null || a.isDead; });
+					hitPlayers.RemoveWhere(delegate(Player p) { return p == null || p.life == null || p.life.isDead; });
 				}
 
 				// 配置文件热重载（每 5 秒检查一次）
@@ -237,25 +263,112 @@ namespace HealthDisplay
 		}
 
 		/// <summary>
-		/// 名单过滤：返回该 key 是否允许显示。
+		/// 名单过滤：僵尸（speciality 枚举名 + 类型索引双 key 兼容）。
 		/// </summary>
-		private static bool IsAllowed(string key, string categoryWildcard)
+		private static bool IsZombieAllowed(Zombie z)
 		{
-			bool isWhiteMode = cfgListMode.Value == "White";
+			if (z == null) return false;
+			bool isWhite = cfgListMode.Value == "White";
+			if (isWhite && parsedWhite.Count == 0) return false;
 
-			bool inWhite = parsedWhite.Contains(key) || parsedWhite.Contains(categoryWildcard);
-			bool inBlack = parsedBlack.Contains(key) || parsedBlack.Contains(categoryWildcard);
+			string specKey = "Z:" + z.speciality.ToString().ToUpper();
+			string typeKey = "Z:" + z.type.ToString();
 
-			if (isWhiteMode)
+			bool inWhite = parsedWhite.Contains("Z:*") || parsedWhite.Contains(specKey) || parsedWhite.Contains(typeKey);
+			bool inBlack = parsedBlack.Contains("Z:*") || parsedBlack.Contains(specKey) || parsedBlack.Contains(typeKey);
+
+			return isWhite ? inWhite : !inBlack;
+		}
+
+		/// <summary>
+		/// 名单过滤：动物（资产 ID）。
+		/// </summary>
+		private static bool IsAnimalAllowed(Animal a)
+		{
+			if (a == null || a.asset == null) return false;
+			bool isWhite = cfgListMode.Value == "White";
+			if (isWhite && parsedWhite.Count == 0) return false;
+
+			string key = "A:" + a.asset.id.ToString();
+
+			bool inWhite = parsedWhite.Contains("A:*") || parsedWhite.Contains(key);
+			bool inBlack = parsedBlack.Contains("A:*") || parsedBlack.Contains(key);
+
+			return isWhite ? inWhite : !inBlack;
+		}
+
+		/// <summary>
+		/// 名单过滤：玩家（SteamID）。
+		/// </summary>
+		private static bool IsPlayerAllowed(string steamId)
+		{
+			bool isWhite = cfgListMode.Value == "White";
+			if (isWhite && parsedWhite.Count == 0) return false;
+
+			string key = "P:" + steamId;
+
+			bool inWhite = parsedWhite.Contains("P:*") || parsedWhite.Contains(key);
+			bool inBlack = parsedBlack.Contains("P:*") || parsedBlack.Contains(key);
+
+			return isWhite ? inWhite : !inBlack;
+		}
+
+		/// <summary>
+		/// 显示范围过滤：该实体是否显示血量。
+		/// </summary>
+		private static bool ShouldDisplayEntity(float sqrDistanceToCam, Vector3 worldPos, object entity)
+		{
+			if (cfgDisplayScope == null) return true;
+			string scope = cfgDisplayScope.Value;
+			if (scope == "Off") return false;
+
+			float maxDist = cfgMaxDistance.Value;
+			if (scope == "Nearby") maxDist = cfgNearbyDistance.Value;
+			if (sqrDistanceToCam > maxDist * maxDist) return false;
+
+			if (scope == "All" || scope == "Nearby") return true;
+
+			Vector2 screenPos;
+			if (!ProjectWorldToScreen(worldPos, out screenPos)) return false;
+
+			if (scope == "View")
 			{
-				// 白名单为空 → 什么都不显示
-				if (parsedWhite.Count == 0) return false;
-				return inWhite;
+				return screenPos.x >= -40f && screenPos.x <= Screen.width + 40f
+					&& screenPos.y >= -40f && screenPos.y <= Screen.height + 40f;
 			}
-			else
+
+			if (scope == "Crosshair")
 			{
-				return !inBlack;
+				Vector2 center = new Vector2(Screen.width * 0.5f, Screen.height * 0.5f);
+				float radius = cfgCrosshairRadius.Value;
+				return (screenPos - center).sqrMagnitude <= radius * radius;
 			}
+
+			if (scope == "Hit")
+			{
+				Zombie z = entity as Zombie;
+				if (z != null) return hitZombies.Contains(z);
+				Animal a = entity as Animal;
+				if (a != null) return hitAnimals.Contains(a);
+				Player p = entity as Player;
+				if (p != null) return hitPlayers.Contains(p);
+				return false;
+			}
+
+			return true;
+		}
+
+		/// <summary>
+		/// 记录本机玩家命中过的目标（Hit 显示范围用）。
+		/// </summary>
+		private static void RecordHit(object entity)
+		{
+			Zombie z = entity as Zombie;
+			if (z != null) { hitZombies.Add(z); return; }
+			Animal a = entity as Animal;
+			if (a != null) { hitAnimals.Add(a); return; }
+			Player p = entity as Player;
+			if (p != null) { hitPlayers.Add(p); }
 		}
 
 		// ==================== 伤害事件（服务器端/单机）====================
@@ -268,8 +381,17 @@ namespace HealthDisplay
 		{
 			try
 			{
-				if (!cfgShowDamageNumbers.Value || !IsFullMode()) return;
+				if (!IsFullMode()) return;
 				if (parameters.zombie == null || parameters.zombie.isDead) return;
+
+				// 本机玩家命中的目标（Hit 显示范围）
+				Player inst = parameters.instigator as Player;
+				if (inst != null && inst == Player.LocalPlayer)
+				{
+					RecordHit(parameters.zombie);
+				}
+
+				if (!cfgShowDamageNumbers.Value) return;
 
 				float times = parameters.times;
 				if (parameters.applyGlobalArmorMultiplier)
@@ -293,8 +415,16 @@ namespace HealthDisplay
 		{
 			try
 			{
-				if (!cfgShowDamageNumbers.Value || !IsFullMode()) return;
+				if (!IsFullMode()) return;
 				if (parameters.animal == null || parameters.animal.isDead) return;
+
+				Player inst = parameters.instigator as Player;
+				if (inst != null && inst == Player.LocalPlayer)
+				{
+					RecordHit(parameters.animal);
+				}
+
+				if (!cfgShowDamageNumbers.Value) return;
 
 				float times = parameters.times;
 				if (parameters.applyGlobalArmorMultiplier)
@@ -316,8 +446,17 @@ namespace HealthDisplay
 		{
 			try
 			{
-				if (!cfgShowDamageNumbers.Value || !IsFullMode()) return;
+				if (!IsFullMode()) return;
 				if (parameters.player == null || parameters.player.life == null || parameters.player.life.isDead) return;
+
+				// 本机玩家命中的目标（Hit 显示范围）：受伤者参数用 killer 判断攻击者
+				Player local = Player.LocalPlayer;
+				if (local != null && local.channel != null && parameters.killer == local.channel.owner.playerID.steamID)
+				{
+					RecordHit(parameters.player);
+				}
+
+				if (!cfgShowDamageNumbers.Value) return;
 
 				float times = parameters.times;
 				if (parameters.respectArmor)
@@ -450,7 +589,6 @@ namespace HealthDisplay
 		{
 			Camera cam = MainCamera.instance;
 			Vector3 camPos = cam.transform.position;
-			float maxDistSqr = cfgMaxDistance.Value * cfgMaxDistance.Value;
 
 			if (cfgShowZombies.Value)
 			{
@@ -459,14 +597,15 @@ namespace HealthDisplay
 				{
 					Zombie z = zombies[i];
 					if (z == null || z.isDead) continue;
-					if ((z.transform.position - camPos).sqrMagnitude > maxDistSqr) continue;
-
-					string key = "Z:" + z.type.ToString();
-					if (!IsAllowed(key, "Z:*")) continue;
+					if (!IsZombieAllowed(z)) continue;
 
 					float headHeight = z.isMega ? 3.4f : (z.speciality == EZombieSpeciality.CRAWLER ? 1.2f : 2.4f);
+					Vector3 headPos = z.transform.position + Vector3.up * headHeight;
+					float sqrDist = (z.transform.position - camPos).sqrMagnitude;
+					if (!ShouldDisplayEntity(sqrDist, headPos, z)) continue;
+
 					Vector2 screenPos;
-					if (!ProjectWorldToScreen(z.transform.position + Vector3.up * headHeight, out screenPos)) continue;
+					if (!ProjectWorldToScreen(headPos, out screenPos)) continue;
 
 					float health = z.GetHealth();
 					float maxHealth = z.GetMaxHealth();
@@ -484,13 +623,14 @@ namespace HealthDisplay
 				{
 					Animal a = animals[i];
 					if (a == null || a.isDead || a.asset == null) continue;
-					if ((a.transform.position - camPos).sqrMagnitude > maxDistSqr) continue;
+					if (!IsAnimalAllowed(a)) continue;
 
-					string key = "A:" + a.asset.id.ToString();
-					if (!IsAllowed(key, "A:*")) continue;
+					Vector3 headPos = a.transform.position + Vector3.up * 1.8f;
+					float sqrDist = (a.transform.position - camPos).sqrMagnitude;
+					if (!ShouldDisplayEntity(sqrDist, headPos, a)) continue;
 
 					Vector2 screenPos;
-					if (!ProjectWorldToScreen(a.transform.position + Vector3.up * 1.8f, out screenPos)) continue;
+					if (!ProjectWorldToScreen(headPos, out screenPos)) continue;
 
 					float health = a.GetHealth();
 					float maxHealth = a.asset.health;
@@ -508,14 +648,16 @@ namespace HealthDisplay
 					SteamPlayer sp = Provider.clients[i];
 					Player p = sp != null ? sp.player : null;
 					if (p == null || p.life == null || p.life.isDead) continue;
-					if ((p.transform.position - camPos).sqrMagnitude > maxDistSqr) continue;
 
 					string steamId = sp.playerID.steamID.ToString();
-					string key = "P:" + steamId;
-					if (!IsAllowed(key, "P:*")) continue;
+					if (!IsPlayerAllowed(steamId)) continue;
+
+					Vector3 headPos = p.transform.position + Vector3.up * 2.3f;
+					float sqrDist = (p.transform.position - camPos).sqrMagnitude;
+					if (!ShouldDisplayEntity(sqrDist, headPos, p)) continue;
 
 					Vector2 screenPos;
-					if (!ProjectWorldToScreen(p.transform.position + Vector3.up * 2.3f, out screenPos)) continue;
+					if (!ProjectWorldToScreen(headPos, out screenPos)) continue;
 
 					float health = p.life.health;
 					float maxHealth = (int)Provider.modeConfigData.Players.Health_Default;
@@ -548,6 +690,9 @@ namespace HealthDisplay
 
 			if (cfgShowZombies.Value && zombie != null)
 			{
+				if (!IsZombieAllowed(zombie)) return;
+				float zHead = zombie.isMega ? 3.4f : (zombie.speciality == EZombieSpeciality.CRAWLER ? 1.2f : 2.4f);
+				if (!ShouldDisplayEntity((zombie.transform.position - cam.transform.position).sqrMagnitude, zombie.transform.position + Vector3.up * zHead, zombie)) return;
 				health = zombie.GetHealth();
 				maxHealth = zombie.GetMaxHealth();
 				if (maxHealth <= 0f) return;
@@ -556,6 +701,8 @@ namespace HealthDisplay
 			}
 			else if (cfgShowAnimals.Value && animal != null && animal.asset != null)
 			{
+				if (!IsAnimalAllowed(animal)) return;
+				if (!ShouldDisplayEntity((animal.transform.position - cam.transform.position).sqrMagnitude, animal.transform.position + Vector3.up * 1.8f, animal)) return;
 				health = animal.GetHealth();
 				maxHealth = animal.asset.health;
 				if (maxHealth <= 0f) return;
@@ -564,6 +711,9 @@ namespace HealthDisplay
 			}
 			else if (cfgShowPlayers.Value && player != null)
 			{
+				string steamId = player.channel != null ? player.channel.owner.playerID.steamID.ToString() : "";
+				if (!IsPlayerAllowed(steamId)) return;
+				if (!ShouldDisplayEntity((player.transform.position - cam.transform.position).sqrMagnitude, player.transform.position + Vector3.up * 2.3f, player)) return;
 				health = player.life.health;
 				maxHealth = (int)Provider.modeConfigData.Players.Health_Default;
 				if (maxHealth <= 0f) maxHealth = 100f;
@@ -619,6 +769,9 @@ namespace HealthDisplay
 
 			if (cfgShowZombies.Value && zombie != null)
 			{
+				if (!IsZombieAllowed(zombie)) return;
+				float zHead = zombie.isMega ? 3.4f : (zombie.speciality == EZombieSpeciality.CRAWLER ? 1.2f : 2.4f);
+				if (!ShouldDisplayEntity((zombie.transform.position - cam.transform.position).sqrMagnitude, zombie.transform.position + Vector3.up * zHead, zombie)) return;
 				health = zombie.GetHealth();
 				maxHealth = zombie.GetMaxHealth();
 				if (maxHealth <= 0f) return;
@@ -627,6 +780,8 @@ namespace HealthDisplay
 			}
 			else if (cfgShowAnimals.Value && animal != null && animal.asset != null)
 			{
+				if (!IsAnimalAllowed(animal)) return;
+				if (!ShouldDisplayEntity((animal.transform.position - cam.transform.position).sqrMagnitude, animal.transform.position + Vector3.up * 1.8f, animal)) return;
 				health = animal.GetHealth();
 				maxHealth = animal.asset.health;
 				if (maxHealth <= 0f) return;
@@ -635,6 +790,9 @@ namespace HealthDisplay
 			}
 			else if (cfgShowPlayers.Value && player != null)
 			{
+				string steamId = player.channel != null ? player.channel.owner.playerID.steamID.ToString() : "";
+				if (!IsPlayerAllowed(steamId)) return;
+				if (!ShouldDisplayEntity((player.transform.position - cam.transform.position).sqrMagnitude, player.transform.position + Vector3.up * 2.3f, player)) return;
 				health = player.life.health;
 				maxHealth = (int)Provider.modeConfigData.Players.Health_Default;
 				if (maxHealth <= 0f) maxHealth = 100f;
