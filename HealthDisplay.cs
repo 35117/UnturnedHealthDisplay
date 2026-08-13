@@ -1,13 +1,14 @@
 // ============================================================
 //  HealthDisplay.cs  —  血量显示插件（Unturned BepInEx 5）
 //  作者：35117+Deepseek-v4-flash-0731
-//  版本：v26.8.13.2
+//  版本：v26.8.13.3
 //
 //  功能：
-//   - 显示生物血量（数字 / 血条 / 两者）
+//   - 显示生物血量（数字 / 血条 / 两者），血条随距离缩放（有上下限）
 //   - 显示位置：头顶 / 准星下方 / 屏幕角落
 //   - 显示范围：所有 / 附近所有（可配距离）/ 视野内 / 准心附近 / 命中时 / 关闭
 //   - 黑白名单过滤（生物选择器标签：僵尸 Z:类型名、动物 A:资产ID，支持 * 通配与玩家 P:SteamID）
+//   - 隔墙检测：目标被遮挡时不显示血条（默认开启）
 //   - 伤害数字：造成伤害时在目标上方飘出伤害数值
 //   - 自己受到的伤害会以红色数字在屏幕中央提示
 //
@@ -26,7 +27,7 @@ using HarmonyLib;
 
 namespace HealthDisplay
 {
-	[BepInPlugin("com.trae.healthdisplay", "血量显示 HealthDisplay", "26.8.13.2")]
+	[BepInPlugin("com.trae.healthdisplay", "血量显示 HealthDisplay", "26.8.13.3")]
 	public class HealthDisplayPlugin : BaseUnityPlugin
 	{
 		// ==================== 配置分类 ====================
@@ -51,6 +52,10 @@ namespace HealthDisplay
 		public static ConfigEntry<float> cfgCrosshairRadius;
 		public static ConfigEntry<float> cfgMaxDistance;
 		public static ConfigEntry<bool> cfgShowNames;
+		public static ConfigEntry<int> cfgNameFontSize;
+		public static ConfigEntry<float> cfgBarScaleMin;
+		public static ConfigEntry<float> cfgBarScaleMax;
+		public static ConfigEntry<bool> cfgOcclusionCheck;
 		public static ConfigEntry<bool> cfgShowDamageNumbers;
 		public static ConfigEntry<float> cfgDamageLifetime;
 		public static ConfigEntry<bool> cfgShowIncomingDamage;
@@ -128,6 +133,14 @@ namespace HealthDisplay
 					Category(CatDisplay, "最大显示距离（米），超过该距离不显示", new AcceptableValueRange<float>(5f, 500f)));
 				cfgShowNames = Config.Bind("Display", "ShowNames", true,
 					Category(CatDisplay, "在血条上方显示名称（僵尸类型 / 动物名 / 玩家名）"));
+				cfgNameFontSize = Config.Bind("Display", "NameFontSize", 13,
+					Category(CatDisplay, "名称字号（随距离缩放，实际显示=该值×缩放倍率）", new AcceptableValueRange<int>(8, 30)));
+				cfgBarScaleMin = Config.Bind("Display", "BarScaleMin", 0.5f,
+					Category(CatDisplay, "血条缩放下限（远处最小倍率；以 10 米为 1 倍）", new AcceptableValueRange<float>(0.2f, 1f)));
+				cfgBarScaleMax = Config.Bind("Display", "BarScaleMax", 1.8f,
+					Category(CatDisplay, "血条缩放上限（近处最大倍率，防止过大）", new AcceptableValueRange<float>(1f, 4f)));
+				cfgOcclusionCheck = Config.Bind("Display", "OcclusionCheck", true,
+					Category(CatDisplay, "不隔墙显示：目标被墙壁/物体遮挡时不显示血条"));
 
 				cfgShowDamageNumbers = Config.Bind("Damage", "ShowDamageNumbers", true,
 					Category(CatDamage, "造成伤害时在目标上方显示伤害数字（服务器端生效）"));
@@ -154,7 +167,7 @@ namespace HealthDisplay
 
 				ParseLists();
 
-				Logger.LogInfo("[HealthDisplay] 插件启动完成 v26.8.13.2");
+				Logger.LogInfo("[HealthDisplay] 插件启动完成 v26.8.13.3");
 			}
 			catch (Exception e)
 			{
@@ -606,13 +619,14 @@ namespace HealthDisplay
 
 					Vector2 screenPos;
 					if (!ProjectWorldToScreen(headPos, out screenPos)) continue;
+					if (cfgOcclusionCheck.Value && IsOccluded(camPos, headPos, z.transform)) continue;
 
 					float health = z.GetHealth();
 					float maxHealth = z.GetMaxHealth();
 					if (maxHealth <= 0f) continue;
 
 					string label = cfgShowNames.Value ? GetZombieName(z) : "";
-					DrawHealthBar(screenPos, health, maxHealth, label, new Color(0.9f, 0.75f, 0.15f));
+					DrawHealthBar(screenPos, health, maxHealth, label, new Color(0.9f, 0.75f, 0.15f), Mathf.Sqrt(sqrDist));
 				}
 			}
 
@@ -631,13 +645,14 @@ namespace HealthDisplay
 
 					Vector2 screenPos;
 					if (!ProjectWorldToScreen(headPos, out screenPos)) continue;
+					if (cfgOcclusionCheck.Value && IsOccluded(camPos, headPos, a.transform)) continue;
 
 					float health = a.GetHealth();
 					float maxHealth = a.asset.health;
 					if (maxHealth <= 0f) continue;
 
 					string label = cfgShowNames.Value ? a.asset.FriendlyName : "";
-					DrawHealthBar(screenPos, health, maxHealth, label, new Color(0.3f, 0.85f, 0.35f));
+					DrawHealthBar(screenPos, health, maxHealth, label, new Color(0.3f, 0.85f, 0.35f), Mathf.Sqrt(sqrDist));
 				}
 			}
 
@@ -658,13 +673,14 @@ namespace HealthDisplay
 
 					Vector2 screenPos;
 					if (!ProjectWorldToScreen(headPos, out screenPos)) continue;
+					if (cfgOcclusionCheck.Value && IsOccluded(camPos, headPos, p.transform)) continue;
 
 					float health = p.life.health;
 					float maxHealth = (int)Provider.modeConfigData.Players.Health_Default;
 					if (maxHealth <= 0f) maxHealth = 100f;
 
 					string label = cfgShowNames.Value ? sp.playerID.playerName : "";
-					DrawHealthBar(screenPos, health, maxHealth, label, new Color(0.85f, 0.3f, 0.3f));
+					DrawHealthBar(screenPos, health, maxHealth, label, new Color(0.85f, 0.3f, 0.3f), Mathf.Sqrt(sqrDist));
 				}
 			}
 		}
@@ -727,7 +743,7 @@ namespace HealthDisplay
 			}
 
 			Vector2 pos = new Vector2(center.x, center.y + 40f);
-			DrawHealthBar(pos, health, maxHealth, label, color);
+			DrawHealthBar(pos, health, maxHealth, label, color, hit.distance);
 		}
 
 		// ---- 角落模式（自己血量 HUD + 准星目标）----
@@ -805,31 +821,33 @@ namespace HealthDisplay
 				return;
 			}
 
-			DrawHealthBar(drawPos, health, maxHealth, label, color);
+			DrawHealthBar(drawPos, health, maxHealth, label, color, hit.distance);
 		}
 
-		// ---- 通用血条绘制 ----
-		private static void DrawHealthBar(Vector2 pos, float health, float maxHealth, string label, Color color)
+		// ---- 通用血条绘制（随距离缩放）----
+		private static void DrawHealthBar(Vector2 pos, float health, float maxHealth, string label, Color color, float distance)
 		{
 			if (maxHealth <= 0f) return;
 			float ratio = Mathf.Clamp01(health / maxHealth);
+			float scale = GetBarScale(distance);
 
 			string mode = cfgDisplayMode.Value;
 			bool showBar = mode == "Both" || mode == "Bar";
 			bool showNumber = mode == "Both" || mode == "Number";
 
-			float barWidth = 64f;
-			float barHeight = 6f;
+			float barWidth = 64f * scale;
+			float barHeight = 6f * scale;
 			float totalHeight = showBar ? barHeight : 0f;
-			if (showNumber) totalHeight += 14f;
-			if (label.Length > 0) totalHeight += 12f;
+			if (showNumber) totalHeight += 14f * scale;
+			if (label.Length > 0) totalHeight += 12f * scale;
 
 			float y = pos.y - totalHeight;
 
 			if (label.Length > 0)
 			{
-				GUI.Label(new Rect(pos.x - 80f, y, 160f, 12f), label, styleBarName);
-				y += 12f;
+				styleBarName.fontSize = Mathf.Max(8, Mathf.RoundToInt(cfgNameFontSize.Value * scale));
+				GUI.Label(new Rect(pos.x - 80f * scale, y, 160f * scale, 12f * scale), label, styleBarName);
+				y += 12f * scale;
 			}
 
 			if (showBar)
@@ -860,8 +878,35 @@ namespace HealthDisplay
 				{
 					text = Mathf.CeilToInt(health).ToString() + "/" + Mathf.CeilToInt(maxHealth).ToString();
 				}
-				GUI.Label(new Rect(pos.x - 80f, y, 160f, 14f), text, styleBarNumber);
+				styleBarNumber.fontSize = Mathf.Max(8, Mathf.RoundToInt(11f * scale));
+				GUI.Label(new Rect(pos.x - 80f * scale, y, 160f * scale, 14f * scale), text, styleBarNumber);
 			}
+		}
+
+		/// <summary>
+		/// 血条缩放倍率：以 10 米为 1 倍，近大远小，限制在 [BarScaleMin, BarScaleMax]。
+		/// </summary>
+		private static float GetBarScale(float distance)
+		{
+			float scale = 10f / Mathf.Max(distance, 0.1f);
+			return Mathf.Clamp(scale, cfgBarScaleMin.Value, cfgBarScaleMax.Value);
+		}
+
+		/// <summary>
+		/// 隔墙检测：相机到目标头部之间被其他物体（非目标自身、非本地玩家）遮挡。
+		/// </summary>
+		private static bool IsOccluded(Vector3 from, Vector3 to, Transform ignore)
+		{
+			RaycastHit hit;
+			if (!Physics.Linecast(from, to, out hit)) return false;
+			if (hit.transform == null) return false;
+
+			if (ignore != null && hit.transform.IsChildOf(ignore)) return false;
+
+			Player local = Player.LocalPlayer;
+			if (local != null && hit.transform.IsChildOf(local.transform)) return false;
+
+			return true;
 		}
 
 		// ---- HUD 血条（角落）----
